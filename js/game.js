@@ -59,6 +59,7 @@ class SalarymanGame {
         this.canDrop = true;
         this.currentCharacter = null;
         this.nextCharacterLevel = 0;
+        this.scoreMultiplier = 1;
         
         // 画像キャッシュ
         this.images = {};
@@ -82,6 +83,13 @@ class SalarymanGame {
         this.sounds = {};
         this.bgm = null;
         this.isBgmPlaying = false;
+
+        // 社畜イベント管理
+        this.mergeTimestamps = [];
+        this.lastMergeTime = Date.now();
+        this.eventState = null;
+        this.eventEndTime = 0;
+        this.toastTimeout = null;
         
         // 初期化
         this.init();
@@ -112,6 +120,9 @@ class SalarymanGame {
         // 最初のキャラクター準備
         this.nextCharacterLevel = this.getRandomDropLevel();
         this.prepareNextCharacter();
+
+        // 朝礼イベントで通知を表示
+        this.triggerMorningBriefing();
         
         // 進化表を生成
         this.createEvolutionChart();
@@ -244,7 +255,8 @@ class SalarymanGame {
         this.world = this.engine.world;
         
         // 重力設定
-        this.engine.world.gravity.y = 1.5;
+        this.normalGravity = 1.5;
+        this.engine.world.gravity.y = this.normalGravity;
         
         // ランナー作成
         this.runner = this.Runner.create();
@@ -518,6 +530,77 @@ class SalarymanGame {
         
         // エフェクト表示
         this.showMergeEffect(newX, newY, false);
+
+        // 社畜イベント判定
+        this.registerMergeEvent(newLevel);
+    }
+
+    registerMergeEvent(newLevel) {
+        const now = Date.now();
+        this.lastMergeTime = now;
+        this.mergeTimestamps = this.mergeTimestamps.filter((time) => now - time <= 5000);
+        this.mergeTimestamps.push(now);
+
+        if (!this.eventState && this.mergeTimestamps.length >= 3) {
+            this.triggerOvertime();
+        }
+
+        if (newLevel >= 5 && Math.random() < 0.3) {
+            this.spawnRecruit();
+        }
+    }
+
+    triggerMorningBriefing() {
+        this.eventState = 'briefing';
+        this.eventEndTime = Date.now() + 6000;
+        this.scoreMultiplier = 1.1;
+        this.engine.world.gravity.y = 1.2;
+        this.showNotification('朝礼スタート！安定落下＆給料1.1倍');
+    }
+
+    triggerOvertime() {
+        this.eventState = 'overtime';
+        this.eventEndTime = Date.now() + 10000;
+        this.scoreMultiplier = 1.5;
+        this.engine.world.gravity.y = 2.4;
+        this.showNotification('残業発動！落下速度UP＆給料1.5倍');
+    }
+
+    triggerPaidLeave() {
+        this.eventState = 'paidleave';
+        this.eventEndTime = Date.now() + 8000;
+        this.scoreMultiplier = 1.2;
+        this.engine.world.gravity.y = 0.9;
+        this.showNotification('有給取得！落下がゆったり＆給料1.2倍');
+    }
+
+    endEventIfNeeded() {
+        if (!this.eventState) return;
+        if (Date.now() < this.eventEndTime) return;
+        this.eventState = null;
+        this.scoreMultiplier = 1;
+        this.engine.world.gravity.y = this.normalGravity;
+    }
+
+    spawnRecruit() {
+        const level = 0;
+        const char = CHARACTER_DATA[level];
+        const spawnX = this.gameArea.x + Math.random() * this.gameArea.width;
+        const body = this.Bodies.circle(
+            spawnX,
+            this.gameArea.y - char.baseRadius - 20,
+            char.baseRadius,
+            {
+                label: 'character',
+                restitution: 0.3,
+                friction: 0.5,
+                frictionAir: 0.015,
+                density: 0.001
+            }
+        );
+        body.characterLevel = level;
+        this.Composite.add(this.world, body);
+        this.showNotification('部下スカウト！インターンが入社');
     }
     
     showMergeEffect(x, y, isChairman) {
@@ -566,7 +649,8 @@ class SalarymanGame {
     // スコア管理
     // ============================================
     addScore(points) {
-        this.score += points;
+        const finalPoints = Math.round(points * this.scoreMultiplier);
+        this.score += finalPoints;
         document.getElementById('score').textContent = this.score.toLocaleString();
     }
     
@@ -639,6 +723,15 @@ class SalarymanGame {
         this.overLineTimers.clear();
         this.effects = [];
         this.isBgmPlaying = false;
+        this.mergeTimestamps = [];
+        this.lastMergeTime = Date.now();
+        this.eventState = null;
+        this.eventEndTime = 0;
+        this.scoreMultiplier = 1;
+        if (this.engine) {
+            this.engine.world.gravity.y = this.normalGravity;
+        }
+        this.hideNotification();
         
         // UI更新
         document.getElementById('score').textContent = '0';
@@ -647,6 +740,9 @@ class SalarymanGame {
         // 新しいキャラクター準備
         this.nextCharacterLevel = this.getRandomDropLevel();
         this.prepareNextCharacter();
+
+        // 再スタート時も朝礼イベント
+        this.triggerMorningBriefing();
     }
     
     // ============================================
@@ -661,6 +757,12 @@ class SalarymanGame {
     update() {
         if (!this.isGameOver) {
             this.checkGameOver();
+            this.endEventIfNeeded();
+
+            if (!this.eventState && Date.now() - this.lastMergeTime > 12000) {
+                this.triggerPaidLeave();
+                this.lastMergeTime = Date.now();
+            }
         }
         
         // エフェクト更新
@@ -674,6 +776,27 @@ class SalarymanGame {
         
         // 合体ペアをクリア（次のフレーム用）
         this.mergePairs.clear();
+    }
+
+    showNotification(message) {
+        const toast = document.getElementById('event-toast');
+        if (!toast) return;
+        toast.textContent = message;
+        toast.classList.add('show');
+
+        if (this.toastTimeout) {
+            clearTimeout(this.toastTimeout);
+        }
+
+        this.toastTimeout = setTimeout(() => {
+            this.hideNotification();
+        }, 2500);
+    }
+
+    hideNotification() {
+        const toast = document.getElementById('event-toast');
+        if (!toast) return;
+        toast.classList.remove('show');
     }
     
     draw() {
