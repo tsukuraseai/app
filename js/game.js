@@ -120,6 +120,9 @@ class SalarymanGame {
         // 最初のキャラクター準備
         this.nextCharacterLevel = this.getRandomDropLevel();
         this.prepareNextCharacter();
+
+        // 朝礼イベントで通知を表示
+        this.triggerMorningBriefing();
         
         // 進化表を生成
         this.createEvolutionChart();
@@ -547,6 +550,14 @@ class SalarymanGame {
         }
     }
 
+    triggerMorningBriefing() {
+        this.eventState = 'briefing';
+        this.eventEndTime = Date.now() + 6000;
+        this.scoreMultiplier = 1.1;
+        this.engine.world.gravity.y = 1.2;
+        this.showNotification('朝礼スタート！安定落下＆給料1.1倍');
+    }
+
     triggerOvertime() {
         this.eventState = 'overtime';
         this.eventEndTime = Date.now() + 10000;
@@ -729,6 +740,9 @@ class SalarymanGame {
         // 新しいキャラクター準備
         this.nextCharacterLevel = this.getRandomDropLevel();
         this.prepareNextCharacter();
+
+        // 再スタート時も朝礼イベント
+        this.triggerMorningBriefing();
     }
     
     // ============================================
@@ -745,7 +759,7 @@ class SalarymanGame {
             this.checkGameOver();
             this.endEventIfNeeded();
 
-            if (!this.eventState && Date.now() - this.lastMergeTime > 20000) {
+            if (!this.eventState && Date.now() - this.lastMergeTime > 12000) {
                 this.triggerPaidLeave();
                 this.lastMergeTime = Date.now();
             }
