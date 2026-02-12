@@ -24,6 +24,7 @@ const CFG = {
     BALL_SPEED: 4.5,
     BALL_MIN_DY: 1.5,
     BALL_MAX: 20,
+    BALL_TRAIL: 8,
 
     MULTI_BALL_KILLS: 3,
     MULTI_BALL_CHANCE: 0.7,
@@ -49,6 +50,16 @@ const CFG = {
     ENEMY_SHOOT_CD: 120,
     ENEMY_BULLET_SPEED: 3,
     ENEMY_MAX: 120,
+
+    POWERUP_FALL_SPEED: 2.3,
+    POWERUP_SIZE: 22,
+    POWERUP_DROP_CHANCE: 0.23,
+
+    FEVER_GAIN_SMALL: 8,
+    FEVER_GAIN_MEDIUM: 14,
+    FEVER_GAIN_HEAVY: 24,
+    FEVER_MAX: 100,
+    FEVER_DURATION: 540,
 
     BLOCK_W: 55,
     BLOCK_H: 22,
@@ -143,6 +154,12 @@ let multDecayTimer = 0;
 let multFlash = 0;
 
 let killsSinceLastBall = 0;
+let combo = 0;
+let comboTimer = 0;
+let feverGauge = 0;
+let feverTimer = 0;
+let shieldBoostTimer = 0;
+let overdriveTimer = 0;
 
 let shield = { x: W / 2, y: CFG.SHIELD_Y, w: CFG.SHIELD_W, h: CFG.SHIELD_H };
 
@@ -159,6 +176,8 @@ let blocks = [];
 let bullets = [];
 let particles = [];
 let stars = [];
+let powerups = [];
+let floatTexts = [];
 
 let enemyDir = 1;
 let enemyMoveTimer = 0;
@@ -246,7 +265,65 @@ function resetMult() {
 }
 
 function getScore(base) {
-    return Math.floor(base * mult);
+    const feverBonus = feverTimer > 0 ? 1.5 : 1;
+    return Math.floor(base * mult * feverBonus);
+}
+
+function addFloatText(text, x, y, color, size = 14, life = 50) {
+    floatTexts.push({ text, x, y, color, size, life, maxLife: life });
+}
+
+function addCombo() {
+    combo++;
+    comboTimer = 150;
+}
+
+function resetCombo() {
+    combo = 0;
+    comboTimer = 0;
+}
+
+function addFever(amount) {
+    if (feverTimer > 0) return;
+    feverGauge = Math.min(CFG.FEVER_MAX, feverGauge + amount);
+    if (feverGauge >= CFG.FEVER_MAX) {
+        feverGauge = 0;
+        feverTimer = CFG.FEVER_DURATION;
+        screenFlash = 10;
+        addFloatText('FEVER MODE!', W / 2, H * 0.42, '#ff66ff', 34, 80);
+    }
+}
+
+function spawnPowerup(x, y) {
+    if (Math.random() > CFG.POWERUP_DROP_CHANCE) return;
+    const pool = ['widen', 'multiball', 'overdrive', 'repair'];
+    const type = pool[Math.floor(Math.random() * pool.length)];
+    powerups.push({
+        x,
+        y,
+        dy: CFG.POWERUP_FALL_SPEED,
+        type,
+        size: CFG.POWERUP_SIZE,
+        pulse: Math.random() * Math.PI * 2
+    });
+}
+
+function applyPowerup(type) {
+    if (type === 'widen') {
+        shieldBoostTimer = 660;
+        shield.w = CFG.SHIELD_W * 1.45;
+        addFloatText('SHIELD UP', shield.x, shield.y - 45, '#44ddff', 16, 60);
+    } else if (type === 'multiball') {
+        spawnExtraBall();
+        spawnExtraBall();
+        addFloatText('TRIPLE BURST', shield.x, shield.y - 45, '#66ffcc', 16, 60);
+    } else if (type === 'overdrive') {
+        overdriveTimer = 540;
+        addFloatText('OVERDRIVE', shield.x, shield.y - 45, '#ffaa33', 16, 60);
+    } else if (type === 'repair') {
+        ship.hp = Math.min(ship.maxHp, ship.hp + 2);
+        addFloatText('SHIP +2', ship.x, H - CFG.SHIP_VIS_H - 14, '#66ff88', 15, 60);
+    }
 }
 
 // ==================== INIT ====================
@@ -270,17 +347,28 @@ function initEnemies() {
     const totalW = cols * (CFG.ENEMY_W + CFG.ENEMY_PAD) - CFG.ENEMY_PAD;
     const sx = (W - totalW) / 2 + CFG.ENEMY_W / 2;
 
-    // Wave5以降、medium敵の割合が増加
+    // Wave進行でmedium/elite敵が増える
     const mediumRows = Math.min(rows, 1 + Math.floor(wave / 4));
+    const eliteRows = wave >= 4 ? Math.min(2, Math.floor((wave - 2) / 5)) : 0;
 
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
+            let type = 'small';
+            let hp = 1;
+            if (r < eliteRows) {
+                type = 'elite';
+                hp = 4 + Math.floor(wave / 8);
+            } else if (r < mediumRows) {
+                type = 'medium';
+                hp = 2;
+            }
+
             enemies.push({
                 x: sx + c * (CFG.ENEMY_W + CFG.ENEMY_PAD),
                 y: CFG.ENEMY_TOP + r * (CFG.ENEMY_H + CFG.ENEMY_PAD),
                 w: CFG.ENEMY_W, h: CFG.ENEMY_H,
-                type: r < mediumRows ? 'medium' : 'small',
-                hp: r < mediumRows ? 2 : 1,
+                type,
+                hp,
                 alive: true,
                 shootTimer: Math.floor(Math.random() * CFG.ENEMY_SHOOT_CD),
                 damageTick: 0
@@ -324,6 +412,11 @@ function startGame() {
     mult = 1.0;
     multDecayTimer = 0;
     killsSinceLastBall = 0;
+    resetCombo();
+    feverGauge = 0;
+    feverTimer = 0;
+    shieldBoostTimer = 0;
+    overdriveTimer = 0;
     initWave();
     playSound('se_start');
     playSound('bgm_main');
@@ -337,7 +430,11 @@ function initWave() {
     balls = [createBall(false)];
     bullets = [];
     particles = [];
+    powerups = [];
+    floatTexts = [];
     killsSinceLastBall = 0;
+    resetCombo();
+    shield.w = CFG.SHIELD_W;
 }
 
 function nextWave() {
@@ -358,8 +455,11 @@ function update() {
     updateShip();
     updateEnemies();
     updateBullets();
+    updatePowerups();
     updateParticles();
+    updateFloatTexts();
     updateMultDecay();
+    updateTimers();
     // 死んだ敵を定期的に掃除（パフォーマンス）
     if (frame % 120 === 0) enemies = enemies.filter(e => e.alive);
     checkCollisions();
@@ -400,6 +500,11 @@ function updateBalls() {
             b.dy = b.dy >= 0 ? CFG.BALL_MIN_DY : -CFG.BALL_MIN_DY;
         }
 
+        if (overdriveTimer > 0) {
+            b.dx *= 1.0015;
+            b.dy *= 1.0015;
+        }
+
         if (b.y - b.r > H) {
             toRemove.push(i);
         }
@@ -416,6 +521,7 @@ function updateBalls() {
 
 function onBallDrop() {
     resetMult();
+    resetCombo();
     playSound('se_ball_drop');
 
     // ボール1個落とすごとに敵2〜3体増殖
@@ -516,7 +622,10 @@ function updateEnemies() {
             if (Math.random() < fireChance) {
                 bullets.push({
                     x: e.x, y: e.y + e.h / 2,
-                    w: 4, h: 12, dy: CFG.ENEMY_BULLET_SPEED + wave * 0.1
+                    w: e.type === 'elite' ? 6 : 4,
+                    h: e.type === 'elite' ? 16 : 12,
+                    dy: CFG.ENEMY_BULLET_SPEED + wave * 0.1 + (e.type === 'elite' ? 1 : 0),
+                    elite: e.type === 'elite'
                 });
                 playSound('se_enemy_shot');
             }
@@ -527,6 +636,51 @@ function updateEnemies() {
 function updateBullets() {
     bullets.forEach(b => { b.y += b.dy; });
     bullets = bullets.filter(b => b.y < H + 20);
+}
+
+function updatePowerups() {
+    for (let i = powerups.length - 1; i >= 0; i--) {
+        const p = powerups[i];
+        p.y += p.dy;
+        p.pulse += 0.08;
+
+        const sl = shield.x - shield.w / 2;
+        const st = shield.y - CFG.SHIELD_CURVE;
+        if (p.x + p.size / 2 > sl && p.x - p.size / 2 < sl + shield.w &&
+            p.y + p.size / 2 > st && p.y - p.size / 2 < st + CFG.SHIELD_CURVE + shield.h) {
+            applyPowerup(p.type);
+            spawn_particles(p.x, p.y, '#66ffff', 14);
+            powerups.splice(i, 1);
+            continue;
+        }
+
+        if (p.y - p.size / 2 > H + 10) powerups.splice(i, 1);
+    }
+}
+
+function updateFloatTexts() {
+    floatTexts.forEach(t => {
+        t.y -= 0.55;
+        t.life--;
+    });
+    floatTexts = floatTexts.filter(t => t.life > 0);
+}
+
+function updateTimers() {
+    if (comboTimer > 0) comboTimer--;
+    else combo = 0;
+
+    if (feverTimer > 0) {
+        feverTimer--;
+        if (frame % 45 === 0 && balls.length < CFG.BALL_MAX && balls.length > 0) spawnExtraBall();
+    }
+
+    if (shieldBoostTimer > 0) {
+        shieldBoostTimer--;
+        if (shieldBoostTimer === 0) shield.w = CFG.SHIELD_W;
+    }
+
+    if (overdriveTimer > 0) overdriveTimer--;
 }
 
 // ==================== PARTICLES ====================
@@ -586,12 +740,19 @@ function collide_ball_shield(ball) {
         const angle = -Math.PI / 2 + clamped * maxAngle;
         const speed = Math.sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
 
-        ball.dx = Math.cos(angle) * speed;
-        ball.dy = Math.sin(angle) * speed;
+        const bonus = feverTimer > 0 ? 1.08 : 1;
+        ball.dx = Math.cos(angle) * speed * bonus;
+        ball.dy = Math.sin(angle) * speed * bonus;
         if (ball.dy > 0) ball.dy = -ball.dy;
         ball.y = st - ball.r;
 
-        spawn_particles(ball.x, ball.y + ball.r, '#00ffff', 5);
+        if (Math.abs(clamped) < 0.15) {
+            addFever(4);
+            addFloatText('PERFECT', ball.x, ball.y - 10, '#66ffff', 12, 26);
+            spawn_particles(ball.x, ball.y, '#88ffff', 10);
+        } else {
+            spawn_particles(ball.x, ball.y + ball.r, '#00ffff', 5);
+        }
         playSound('se_reflect');
     }
 }
@@ -651,24 +812,35 @@ function collide_ball_enemies(ball) {
             const oB = (et + e.h) - (ball.y - ball.r);
             const min = Math.min(oL, oR, oT, oB);
 
-            if (min === oT) { ball.dy = -Math.abs(ball.dy); ball.y = et - ball.r; }
-            else if (min === oB) { ball.dy = Math.abs(ball.dy); ball.y = et + e.h + ball.r; }
-            else if (min === oL) { ball.dx = -Math.abs(ball.dx); ball.x = el - ball.r; }
-            else { ball.dx = Math.abs(ball.dx); ball.x = el + e.w + ball.r; }
+            if (overdriveTimer <= 0) {
+                if (min === oT) { ball.dy = -Math.abs(ball.dy); ball.y = et - ball.r; }
+                else if (min === oB) { ball.dy = Math.abs(ball.dy); ball.y = et + e.h + ball.r; }
+                else if (min === oL) { ball.dx = -Math.abs(ball.dx); ball.x = el - ball.r; }
+                else { ball.dx = Math.abs(ball.dx); ball.x = el + e.w + ball.r; }
+            }
 
             e.hp--;
             e.damageTick = 15;
             addMult();
+            addCombo();
 
             if (e.hp <= 0) {
                 e.alive = false;
-                score += getScore(e.type === 'medium' ? 50 : 25);
-                spawn_particles(e.x, e.y, e.type === 'medium' ? '#cc44ff' : '#ff4444', 12);
+                const enemyScore = e.type === 'elite' ? 110 : e.type === 'medium' ? 50 : 25;
+                score += getScore(enemyScore + Math.min(combo, 25));
+                spawn_particles(e.x, e.y, e.type === 'elite' ? '#ffaa33' : e.type === 'medium' ? '#cc44ff' : '#ff4444', 12);
                 playSound('se_enemy_hit');
+                spawnPowerup(e.x, e.y);
+
+                if (e.type === 'elite') addFever(CFG.FEVER_GAIN_HEAVY);
+                else if (e.type === 'medium') addFever(CFG.FEVER_GAIN_MEDIUM);
+                else addFever(CFG.FEVER_GAIN_SMALL);
+
+                if (combo > 4 && combo % 5 === 0) addFloatText('COMBO x' + combo, e.x, e.y - 8, '#ffee66', 14, 45);
 
                 killsSinceLastBall++;
                 if (killsSinceLastBall >= CFG.MULTI_BALL_KILLS) {
-                    if (Math.random() < CFG.MULTI_BALL_CHANCE) {
+                    if (Math.random() < CFG.MULTI_BALL_CHANCE || feverTimer > 0) {
                         spawnExtraBall();
                     }
                     killsSinceLastBall = 0;
@@ -676,7 +848,7 @@ function collide_ball_enemies(ball) {
             } else {
                 spawn_particles(e.x, e.y, '#ffff00', 5);
             }
-            break;
+            if (overdriveTimer <= 0) break;
         }
     }
 }
@@ -691,6 +863,7 @@ function collide_bullets_shield() {
         if (b.x + b.w / 2 > sl && b.x - b.w / 2 < sl + sw &&
             b.y + b.h > st && b.y < st + sh) {
             spawn_particles(b.x, b.y, '#00aaff', 3);
+            if (feverTimer > 0) addFever(1);
             return false;
         }
         return true;
@@ -729,6 +902,7 @@ function collide_bullets_ship() {
         if (b.x + b.w / 2 > sl && b.x - b.w / 2 < sl + ship.w &&
             b.y + b.h > st) {
             ship.hp--;
+            resetCombo();
             screenFlash = 8;
             spawn_particles(b.x, b.y, '#ff0000', 10);
             playSound('se_ship_damage');
@@ -780,15 +954,24 @@ function draw() {
     drawBlocks();
     drawEnemies();
     drawBullets();
+    drawPowerups();
     drawShield();
     drawBalls();
     drawShip();
     drawParticlesLayer();
+    drawFloatTexts();
     drawHUD();
     drawMultGauge();
+    drawFeverGauge();
 
     if (screenFlash > 0) {
         ctx.fillStyle = `rgba(255, 50, 50, ${screenFlash * 0.03})`;
+        ctx.fillRect(0, 0, W, H);
+    }
+
+    if (feverTimer > 0) {
+        const pulse = 0.08 + Math.sin(frame * 0.2) * 0.03;
+        ctx.fillStyle = `rgba(255, 80, 220, ${pulse})`;
         ctx.fillRect(0, 0, W, H);
     }
 
@@ -843,9 +1026,22 @@ function drawShield() {
 function drawBalls() {
     const img = IMG.ball;
     balls.forEach(b => {
+        b.trail = b.trail || [];
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > CFG.BALL_TRAIL) b.trail.shift();
+
+        for (let i = 0; i < b.trail.length; i++) {
+            const t = b.trail[i];
+            const a = (i + 1) / b.trail.length;
+            ctx.fillStyle = `rgba(0,255,255,${a * 0.25})`;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, b.r * a * 0.9, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
         ctx.save();
-        ctx.shadowColor = '#00eeff';
-        ctx.shadowBlur = 16;
+        ctx.shadowColor = overdriveTimer > 0 ? '#ffaa33' : '#00eeff';
+        ctx.shadowBlur = overdriveTimer > 0 ? 24 : 16;
 
         if (img && img.complete && img.naturalWidth > 0) {
             const s = b.r * 3.2;
@@ -863,7 +1059,7 @@ function drawBalls() {
 function drawEnemies() {
     enemies.forEach(e => {
         if (!e.alive) return;
-        const img = e.type === 'medium' ? IMG.enemy_medium : IMG.enemy_small;
+        const img = e.type === 'small' ? IMG.enemy_small : IMG.enemy_medium;
 
         ctx.save();
 
@@ -874,8 +1070,12 @@ function drawEnemies() {
 
         if (img && img.complete && img.naturalWidth > 0) {
             ctx.drawImage(img, e.x - e.w / 2, e.y - e.h / 2, e.w, e.h);
+            if (e.type === 'elite') {
+                ctx.fillStyle = 'rgba(255, 180, 40, 0.35)';
+                ctx.fillRect(e.x - e.w / 2, e.y - e.h / 2, e.w, e.h);
+            }
         } else {
-            ctx.fillStyle = e.type === 'medium' ? '#aa44ff' : '#ff3333';
+            ctx.fillStyle = e.type === 'elite' ? '#ff9933' : e.type === 'medium' ? '#aa44ff' : '#ff3333';
             ctx.fillRect(e.x - e.w / 2, e.y - e.h / 2, e.w, e.h);
         }
 
@@ -966,11 +1166,45 @@ function drawBullets() {
     ctx.save();
     ctx.shadowColor = '#ff4400';
     ctx.shadowBlur = 8;
-    ctx.fillStyle = '#ff5533';
     bullets.forEach(b => {
+        ctx.fillStyle = b.elite ? '#ffcc66' : '#ff5533';
         ctx.fillRect(b.x - b.w / 2, b.y, b.w, b.h);
     });
     ctx.restore();
+}
+
+function drawPowerups() {
+    powerups.forEach(p => {
+        const pulse = 0.85 + Math.sin(p.pulse) * 0.15;
+        const s = p.size * pulse;
+        const colors = { widen: '#44ddff', multiball: '#66ffcc', overdrive: '#ffaa33', repair: '#66ff88' };
+        const labels = { widen: 'W', multiball: 'M', overdrive: 'O', repair: 'R' };
+
+        ctx.save();
+        ctx.shadowColor = colors[p.type];
+        ctx.shadowBlur = 16;
+        ctx.fillStyle = colors[p.type];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, s / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#00131f';
+        ctx.font = 'bold 14px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labels[p.type], p.x, p.y + 1);
+        ctx.restore();
+    });
+}
+
+function drawFloatTexts() {
+    floatTexts.forEach(t => {
+        const a = t.life / t.maxLife;
+        ctx.save();
+        ctx.globalAlpha = a;
+        drawText(t.text, t.x, t.y, t.size, t.color);
+        ctx.restore();
+    });
 }
 
 function drawParticlesLayer() {
@@ -996,6 +1230,13 @@ function drawHUD() {
     if (balls.length > 1) {
         drawText('BALL x' + balls.length, W - 12, 48, 13, '#00ffaa', 'right');
     }
+
+    if (combo > 1) {
+        drawText('COMBO x' + combo, 12, 48, 13, '#ffee66', 'left');
+    }
+
+    if (shieldBoostTimer > 0) drawText('SHIELD UP', W - 12, 68, 12, '#66ddff', 'right');
+    if (overdriveTimer > 0) drawText('OVERDRIVE', W - 12, 84, 12, '#ffaa33', 'right');
 }
 
 function drawMultGauge() {
@@ -1033,6 +1274,24 @@ function drawMultGauge() {
     ctx.restore();
 }
 
+function drawFeverGauge() {
+    const w = 140;
+    const h = 8;
+    const x = 14;
+    const y = H - 20;
+    const ratio = feverTimer > 0 ? 1 : feverGauge / CFG.FEVER_MAX;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = feverTimer > 0 ? '#ff66dd' : '#66bbff';
+    ctx.fillRect(x, y, w * ratio, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.strokeRect(x, y, w, h);
+
+    const txt = feverTimer > 0 ? 'FEVER!' : 'FEVER';
+    drawText(txt, x + w / 2, y - 8, 12, feverTimer > 0 ? '#ff99ff' : '#77ccff', 'center');
+}
+
 function drawText(text, x, y, size, color, align) {
     ctx.save();
     ctx.font = `bold ${size}px "Courier New", monospace`;
@@ -1059,6 +1318,7 @@ function drawTitle() {
 
     drawText('← → / マウス  シールド移動', W / 2, H / 2 + 150, 13, '#555555');
     drawText('SPACE / クリック  ボール発射', W / 2, H / 2 + 172, 13, '#555555');
+    drawText('ドロップを取って強化・FEVERで弾幕反撃！', W / 2, H / 2 + 198, 13, '#6666aa');
 
     ctx.save();
     ctx.shadowColor = '#00ddff';
